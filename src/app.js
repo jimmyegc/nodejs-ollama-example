@@ -17,8 +17,18 @@ import { Pool } from "pg";
 import dotenv from "dotenv";
 import puppeteer from "puppeteer";
 import path from "path";
+import express from "express";
+import cors from "cors";
 
 dotenv.config();
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled Rejection:", err);
+});
 
 /* ============================================================
    CONFIGURACIÓN GENERAL
@@ -394,7 +404,54 @@ Pregunta: ${question}
 }
 
 /* ============================================================
+   SERVIDOR API
+============================================================ */
+const app = express();
+const PORT = 9000;
+
+app.use(cors());
+app.use(express.json());
+app.use("/images", express.static(process.cwd()));
+
+/* ============================================================
+   ENDPOINT PRINCIPAL
+============================================================ */
+
+app.post("/agent", async (req, res) => {
+  try {
+    const { question } = req.body;
+
+    if (!question) {
+      return res.status(400).json({ error: "Falta 'question'" });
+    }
+
+    const result = await agent(question);
+
+    res.json({
+      success: true,
+      result,
+    });
+  } catch (error) {
+    console.error("Error en /agent:", error);
+    res.status(500).json({
+      success: false,
+      error: "Error interno del servidor",
+    });
+  }
+});
+
+async function startServer() {
+  app.listen(PORT, () => {
+    console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
+  });
+}
+
+startServer();
+
+process.stdin.resume();
+
+/* ============================================================
    EJECUCIÓN
 ============================================================ */
 
-await agent("Crea una infografía profesional sobre microservicios");
+// await agent("Crea una infografía profesional sobre microservicios");

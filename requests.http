@@ -1,10 +1,62 @@
-
-### 
+### Test Agent
 POST http://localhost:9000/agent
 Content-Type: application/json
 
 {
-  "question": "Cuales son las novedades de React 19"
+  "question":"Lee esta página y dime de qué trata https://es.wikipedia.org/wiki/Microservicios"
 }
 
-# "Busca empresas que necesiten software y envíales una propuesta."
+### 1️⃣ Buscar información en internet
+POST http://localhost:9000/agent
+Content-Type: application/json
+
+{
+"question":"Busca en internet que es MCP en inteligencia artificial"
+}
+
+### 2️⃣ Buscar negocios sin página web
+POST http://localhost:9000/agent
+Content-Type: application/json
+
+{
+  "question":"Encuentra negocios en CDMX que normalmente no tienen página web"
+}
+
+### 3️⃣ Leer contenido de una página
+POST http://localhost:9000/agent
+Content-Type: application/json
+
+{
+  "question":"Lee esta página y dime de qué trata https://es.wikipedia.org/wiki/Microservicios"
+}
+
+### 4️⃣ Clima
+POST http://localhost:9000/agent
+Content-Type: application/json
+
+{
+  "question":"¿Cuál es el clima actual en Ciudad de México?"
+}
+
+### 5️⃣ Generar infografía
+POST http://localhost:9000/agent
+Content-Type: application/json
+
+{
+  "question":"Crea una infografía sobre arquitectura de microservicios"
+}
+
+### 6️⃣ Caso complejo (agente real)
+POST http://localhost:9000/agent
+Content-Type: application/json
+
+{
+  "question":"Investiga qué es RAG en inteligencia artificial y genera una infografía con los puntos clave"
+}
+
+
+
+
+
+
+

@@ -1,15 +1,5 @@
 /*****************************************************************
- AGENTE AVANZADO CON:
- - RAG (documentos con pgvector)
- - Memoria conversacional persistente
- - Tools:
-      • searchDocuments
-      • sendNotification
-      • getWeather
-      • generateInfographic
- - Generación de infografías profesionales (HTML + Puppeteer)
- - Manejo robusto de JSON del LLM
- - Umbral de memoria configurable
+ AGENTE AVANZADO
 *****************************************************************/
 
 import fetch from "node-fetch";
@@ -19,24 +9,16 @@ import puppeteer from "puppeteer";
 import path from "path";
 import express from "express";
 import cors from "cors";
+import * as cheerio from "cheerio";
 
 dotenv.config();
 
-process.on("uncaughtException", (err) => {
-  console.error("Uncaught Exception:", err);
-});
-
-process.on("unhandledRejection", (err) => {
-  console.error("Unhandled Rejection:", err);
-});
-
 /* ============================================================
-   CONFIGURACIÓN GENERAL
+CONFIG
 ============================================================ */
 
 const LLM_MODEL = "llama3";
 const EMBEDDING_MODEL = "nomic-embed-text";
-const MEMORY_THRESHOLD = 0.5;
 
 const pool = new Pool({
   user: "postgres",
@@ -47,51 +29,27 @@ const pool = new Pool({
 });
 
 /* ============================================================
-   UTILIDADES BASE
+UTILS
 ============================================================ */
 
-/*
-  Limpia salida del LLM y extrae JSON válido
-*/
 function safeJSONParse(text) {
   if (!text) return null;
 
   try {
     return JSON.parse(text);
-  } catch (err) {
-    console.log("⚠️ JSON inválido. Intentando reparar...");
+  } catch {}
 
-    // Intentar cerrar llaves faltantes
-    let fixed = text.trim();
+  const match = text.match(/\{[\s\S]*\}/);
 
-    // Extraer desde la primera llave
-    const start = fixed.indexOf("{");
-    if (start !== -1) {
-      fixed = fixed.slice(start);
-    }
+  if (!match) return null;
 
-    // Contar llaves abiertas y cerradas
-    const openBraces = (fixed.match(/{/g) || []).length;
-    const closeBraces = (fixed.match(/}/g) || []).length;
-
-    const missing = openBraces - closeBraces;
-
-    if (missing > 0) {
-      fixed += "}".repeat(missing);
-    }
-
-    try {
-      return JSON.parse(fixed);
-    } catch {
-      console.log("❌ No se pudo reparar JSON.");
-      return null;
-    }
+  try {
+    return JSON.parse(match[0]);
+  } catch {
+    return null;
   }
 }
 
-/*
-  Llamada al modelo
-*/
 async function callLLM(prompt) {
   const response = await fetch("http://localhost:11434/api/generate", {
     method: "POST",
@@ -100,20 +58,14 @@ async function callLLM(prompt) {
       model: LLM_MODEL,
       prompt,
       stream: false,
-      options: {
-        temperature: 0, // 🔥 Reduce creatividad
-        top_p: 0.9,
-      },
+      options: { temperature: 0 },
     }),
   });
 
   const data = await response.json();
-  return data.response.trim();
+  return data.response?.trim() || "";
 }
 
-/*
-  Embeddings
-*/
 async function createEmbedding(text) {
   const response = await fetch("http://localhost:11434/api/embeddings", {
     method: "POST",
@@ -133,67 +85,72 @@ function toPgVector(array) {
 }
 
 /* ============================================================
-   RAG
+RAG
 ============================================================ */
-
-async function saveDocument(text) {
-  const embedding = await createEmbedding(text);
-  await pool.query(
-    "INSERT INTO documents (content, embedding) VALUES ($1, $2)",
-    [text, toPgVector(embedding)],
-  );
-}
 
 async function searchDocuments(query) {
   const embedding = await createEmbedding(query);
 
   const result = await pool.query(
     `
-    SELECT content,
-           (embedding <=> $1) AS distance
-    FROM documents
-    ORDER BY embedding <=> $1
-    LIMIT 3;
-  `,
+SELECT content,
+       (embedding <=> $1) AS distance
+FROM documents
+ORDER BY embedding <=> $1
+LIMIT 3
+`,
     [toPgVector(embedding)],
   );
 
-  return result.rows;
+  return result.rows.map((r) => r.content).join("\n");
 }
 
 /* ============================================================
-   MEMORIA
+TOOLS
 ============================================================ */
 
-async function saveMemory(text) {
-  const embedding = await createEmbedding(text);
+async function searchInternet(query) {
+  console.log("🌐 Buscando:", query);
 
-  await pool.query(
-    "INSERT INTO conversation_memory (content, embedding) VALUES ($1, $2)",
-    [text, toPgVector(embedding)],
-  );
+  const url = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+
+  const response = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0" },
+  });
+
+  const html = await response.text();
+  const $ = cheerio.load(html);
+
+  const results = [];
+
+  $(".result").each((i, el) => {
+    const title = $(el).find(".result__title").text().trim();
+    const snippet = $(el).find(".result__snippet").text().trim();
+    const link = $(el).find(".result__a").attr("href");
+
+    if (title && snippet) {
+      results.push(`${title}\n${snippet}\n${link}`);
+    }
+  });
+
+  return results.slice(0, 5).join("\n\n");
 }
 
-async function searchMemory(query) {
-  const embedding = await createEmbedding(query);
+async function readWebPage(url) {
+  console.log("📄 Leyendo:", url);
 
-  const result = await pool.query(
-    `
-    SELECT content,
-           (embedding <=> $1) AS distance
-    FROM conversation_memory
-    ORDER BY embedding <=> $1
-    LIMIT 3;
-  `,
-    [toPgVector(embedding)],
-  );
+  const response = await fetch(url);
+  const html = await response.text();
 
-  return result.rows;
+  const $ = cheerio.load(html);
+
+  const text = $("p")
+    .map((i, el) => $(el).text())
+    .get()
+    .join(" ");
+
+  return text.slice(0, 4000);
 }
-
-/* ============================================================
-   TOOLS
-============================================================ */
 
 async function getWeather(city) {
   const API_KEY = process.env.OPENWEATHER_KEY;
@@ -203,9 +160,7 @@ async function getWeather(city) {
   const response = await fetch(url);
   const data = await response.json();
 
-  if (data.cod !== 200) {
-    return `No pude obtener el clima para ${city}.`;
-  }
+  if (data.cod !== 200) return "No pude obtener el clima.";
 
   return `
 Clima en ${data.name}:
@@ -220,81 +175,38 @@ function sendNotification(message) {
   console.log("📢 NOTIFICACIÓN:", message);
 }
 
-/* ============================================================
-   GENERADOR DE INFOGRAFÍAS
-============================================================ */
-
 async function generateInfographic(topic) {
-  const structurePrompt = `
-Genera una estructura JSON limpia para una infografía profesional sobre "${topic}".
+  const prompt = `
+Genera JSON para una infografía sobre "${topic}"
 
-Formato obligatorio:
 {
-  "title": "...",
-  "sections": [
-    { "heading": "...", "content": "..." }
-  ]
+"title":"",
+"sections":[
+{"heading":"","content":""}
+]
 }
-
-NO agregues texto adicional.
-Devuelve SOLO JSON válido.
 `;
 
-  const raw = await callLLM(structurePrompt);
+  const raw = await callLLM(prompt);
   const data = safeJSONParse(raw);
 
-  if (!data) {
-    throw new Error("El modelo no devolvió JSON válido.");
-  }
+  if (!data) return "Error generando infografía";
 
   const html = `
-  <html>
-  <head>
-    <style>
-      body {
-        font-family: Arial, sans-serif;
-        width: 1080px;
-        padding: 60px;
-        background: linear-gradient(to bottom, #f8fafc, #e2e8f0);
-        color: #1e293b;
-      }
-      h1 {
-        text-align: center;
-        font-size: 48px;
-        margin-bottom: 50px;
-      }
-      .section {
-        margin-bottom: 40px;
-        padding: 30px;
-        background: white;
-        border-radius: 16px;
-        box-shadow: 0 8px 24px rgba(0,0,0,0.05);
-      }
-      .section h2 {
-        margin-bottom: 15px;
-        color: #2563eb;
-      }
-      p {
-        font-size: 20px;
-        line-height: 1.6;
-      }
-    </style>
-  </head>
-  <body>
-    <h1>${data.title}</h1>
-    ${data.sections
-      .map(
-        (s) => `
-      <div class="section">
-        <h2>${s.heading}</h2>
-        <p>${s.content}</p>
-      </div>
-    `,
-      )
-      .join("")}
-  </body>
-  </html>
-  `;
+<html>
+<body style="font-family:Arial;padding:60px">
+<h1>${data.title}</h1>
+${data.sections
+  .map(
+    (s) => `
+<h2>${s.heading}</h2>
+<p>${s.content}</p>
+`,
+  )
+  .join("")}
+</body>
+</html>
+`;
 
   const browser = await puppeteer.launch({ headless: "new" });
   const page = await browser.newPage();
@@ -303,7 +215,11 @@ Devuelve SOLO JSON válido.
   await page.setContent(html);
 
   const filePath = path.join(process.cwd(), `infographic-${Date.now()}.png`);
-  await page.screenshot({ path: filePath, fullPage: true });
+
+  await page.screenshot({
+    path: filePath,
+    fullPage: true,
+  });
 
   await browser.close();
 
@@ -311,101 +227,159 @@ Devuelve SOLO JSON válido.
 }
 
 /* ============================================================
-   AGENTE PRINCIPAL
+TOOLS REGISTRY
 ============================================================ */
 
-async function agent(question) {
-  console.log("\n===============================");
-  console.log("Pregunta:", question);
-  console.log("===============================\n");
+const tools = [
+  {
+    name: "searchInternet",
+    description: "Busca información en internet",
+    execute: searchInternet,
+  },
+  {
+    name: "readWebPage",
+    description: "Lee el contenido de una página web",
+    execute: readWebPage,
+  },
+  {
+    name: "searchDocuments",
+    description: "Busca información en documentos locales",
+    execute: searchDocuments,
+  },
+  {
+    name: "getWeather",
+    description: "Obtiene el clima de una ciudad",
+    execute: getWeather,
+  },
+  {
+    name: "generateInfographic",
+    description: "Genera una infografía en imagen",
+    execute: generateInfographic,
+  },
+];
 
-  /* 1️⃣ MEMORIA */
-  const memories = await searchMemory(question);
-  const relevantMemories = memories.filter(
-    (m) => m.distance < MEMORY_THRESHOLD,
-  );
+/* ============================================================
+AGENTE
+============================================================ */
 
-  const memoryContext = relevantMemories.map((m) => m.content).join("\n---\n");
+async function createPlan(objective, memory) {
+  const toolsDescription = tools
+    .map((t) => `- ${t.name}: ${t.description}`)
+    .join("\n");
 
-  /* 2️⃣ DECISIÓN */
-  const systemPrompt = `
-Eres un agente con herramientas.
+  const trimmedMemory = memory.slice(-6).join("\n");
 
-Herramientas disponibles:
-- searchDocuments(query)
-- sendNotification(message)
-- getWeather(city)
-- generateInfographic(topic)
+  const prompt = `
+Eres un agente autónomo que resuelve tareas paso a paso.
 
-Si necesitas herramienta, responde SOLO JSON:
+OBJETIVO DEL USUARIO:
+${objective}
+
+MEMORIA:
+${trimmedMemory}
+
+HERRAMIENTAS DISPONIBLES:
+${toolsDescription}
+
+Reglas IMPORTANTES:
+
+1. Si necesitas usar una herramienta usa EXACTAMENTE este formato:
 
 {
-  "tool": "nombre",
-  "input": { }
+ "action": "tool",
+ "tool": "nombre_tool",
+ "input": "texto"
 }
 
-No agregues texto extra.
+2. Si ya tienes suficiente información responde:
+
+{
+ "finalAnswer": "respuesta"
+}
+
+3. NUNCA inventes resultados.
+4. NUNCA pongas placeholders como [insertar algo].
+5. SOLO responde JSON válido.
 `;
 
-  const firstResponse = await callLLM(
-    systemPrompt +
-      (memoryContext ? "\nMemoria:\n" + memoryContext : "") +
-      "\nPregunta:\n" +
-      question,
-  );
+  const raw = await callLLM(prompt);
 
-  console.log("Decisión del modelo:\n", firstResponse);
-
-  const parsed = safeJSONParse(firstResponse);
+  const parsed = safeJSONParse(raw);
 
   if (!parsed) {
-    await saveMemory(`Usuario: ${question}\nAgente: ${firstResponse}`);
-    console.log("\nRespuesta final:\n", firstResponse);
-    return firstResponse;
+    console.log("⚠️ El modelo no devolvió JSON válido:", raw);
+    return { finalAnswer: raw };
   }
 
-  /* 3️⃣ EJECUCIÓN TOOL */
+  return parsed;
+}
 
-  switch (parsed.tool) {
-    case "searchDocuments": {
-      const docs = await searchDocuments(parsed.input.query);
-      const context = docs.map((d) => d.content).join("\n---\n");
-
-      const finalAnswer = await callLLM(`
-Contexto:
-${context}
-
-Responde usando solo ese contexto.
-Pregunta: ${question}
-`);
-
-      await saveMemory(`Usuario: ${question}\nAgente: ${finalAnswer}`);
-      return finalAnswer;
+async function agent(objective) {
+  let memory = [];
+  const maxSteps = 6;
+  for (let step = 0; step < maxSteps; step++) {
+    console.log(`\n🧠 STEP ${step + 1}`);
+    const decision = await createPlan(objective, memory);
+    console.log("📦 DECISION:", decision);
+    /* ==================================================== SI EL MODELO YA QUIERE RESPONDER ==================================================== */ if (
+      decision.finalAnswer
+    ) {
+      console.log("\n✅ RESPUESTA FINAL\n");
+      return decision.finalAnswer;
     }
-
-    case "sendNotification":
-      sendNotification(parsed.input.message);
-      return "Notificación enviada.";
-
-    case "getWeather": {
-      const result = await getWeather(parsed.input.city);
-      return result;
+    /* ==================================================== SI DECIDE USAR UNA TOOL ==================================================== */ if (
+      decision.action === "tool" ||
+      decision.tool
+    ) {
+      const tool = tools.find((t) => t.name === decision.tool);
+      if (!tool) {
+        const errorMsg = `Tool ${decision.tool} no existe`;
+        console.log("❌", errorMsg);
+        memory.push(errorMsg);
+        continue;
+      }
+      /* ==================================================== EVITAR LOOP DE MISMA TOOL ==================================================== */ const lastStep =
+        memory[memory.length - 1] || "";
+      if (
+        decision.tool === "searchInternet" &&
+        lastStep.includes("searchInternet")
+      ) {
+        console.log("⚠️ Evitando búsqueda repetida");
+        memory.push(
+          "Ya se realizó una búsqueda recientemente. Usar la información disponible para responder.",
+        );
+        continue;
+      }
+      try {
+        const input =
+          typeof decision.input === "string"
+            ? decision.input
+            : JSON.stringify(decision.input);
+        console.log(`🔧 Ejecutando tool: ${decision.tool}`);
+        console.log(`📥 Input: ${input}`);
+        const result = await tool.execute(input);
+        console.log("📤 Resultado:", result?.slice?.(0, 500) || result);
+        memory.push(
+          ` Tool usada: ${decision.tool} Input: ${input} Resultado: ${result} `,
+        );
+      } catch (err) {
+        console.log("💥 Error ejecutando tool:", err);
+        memory.push(` Error ejecutando tool ${decision.tool} ${err.message} `);
+      }
     }
-
-    case "generateInfographic": {
-      const imagePath = await generateInfographic(parsed.input.topic);
-      console.log("Infografía generada:", imagePath);
-      return imagePath;
-    }
-
-    default:
-      return "Tool no reconocida.";
   }
+  /* ==================================================== FALLBACK SI SE ALCANZA MAX STEPS ==================================================== */ console.log(
+    "\n⚠️ Max steps alcanzado. Generando respuesta final...\n",
+  );
+  const summaryPrompt = ` Responde al usuario usando la información recopilada. OBJETIVO: ${objective} INFORMACIÓN RECOLECTADA: ${memory.join("\n")} `;
+  const finalAnswer = await callLLM(summaryPrompt);
+  return finalAnswer;
 }
 
 /* ============================================================
-   SERVIDOR API
+SERVER
 ============================================================ */
+
 const app = express();
 const PORT = 9000;
 
@@ -413,17 +387,9 @@ app.use(cors());
 app.use(express.json());
 app.use("/images", express.static(process.cwd()));
 
-/* ============================================================
-   ENDPOINT PRINCIPAL
-============================================================ */
-
 app.post("/agent", async (req, res) => {
   try {
     const { question } = req.body;
-
-    if (!question) {
-      return res.status(400).json({ error: "Falta 'question'" });
-    }
 
     const result = await agent(question);
 
@@ -431,27 +397,15 @@ app.post("/agent", async (req, res) => {
       success: true,
       result,
     });
-  } catch (error) {
-    console.error("Error en /agent:", error);
+  } catch (err) {
+    console.error(err);
+
     res.status(500).json({
       success: false,
-      error: "Error interno del servidor",
     });
   }
 });
 
-async function startServer() {
-  app.listen(PORT, () => {
-    console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
-  });
-}
-
-startServer();
-
-process.stdin.resume();
-
-/* ============================================================
-   EJECUCIÓN
-============================================================ */
-
-// await agent("Crea una infografía profesional sobre microservicios");
+app.listen(PORT, () => {
+  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
+});

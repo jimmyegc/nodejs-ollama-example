@@ -1,0 +1,10 @@
+
+### 
+POST http://localhost:9000/agent
+Content-Type: application/json
+
+{
+  "question": "Cuales son las novedades de React 19"
+}
+
+# "Busca empresas que necesiten software y envíales una propuesta."
